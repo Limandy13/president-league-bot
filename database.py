@@ -1,0 +1,145 @@
+import sqlite3
+
+DB_FILE = "president.db"
+
+def init_db():
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                id INTEGER PRIMARY KEY,
+                username TEXT,
+                display_name TEXT,
+                is_playing_this_season INTEGER DEFAULT 0,
+                current_season_score INTEGER DEFAULT 0
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS seasons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                is_active INTEGER DEFAULT 0,
+                number_of_rounds_played INTEGER DEFAULT 0,
+                special1 TEXT DEFAULT 'J',
+                special2 TEXT DEFAULT 'Q'
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS player_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                season_id INTEGER,
+                round INTEGER,
+                score_change INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES players(id),
+                FOREIGN KEY(season_id) REFERENCES seasons(id)
+            )
+        """)
+        conn.commit()
+
+def start_new_season(name):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM seasons WHERE is_active = 1")
+        active_s = cursor.fetchone()
+
+        stats = []
+        if active_s:
+            cursor.execute("""
+                SELECT display_name, current_season_score
+                FROM players WHERE is_playing_this_season = 1
+                ORDER BY current_season_score DESC
+            """)
+            stats = cursor.fetchall()
+
+        cursor.execute("UPDATE players SET is_playing_this_season = 0, current_season_score = 0")
+        cursor.execute("UPDATE seasons SET is_active = 0")
+
+        cursor.execute("""
+            INSERT INTO seasons (name, is_active, number_of_rounds_played, special1, special2)
+            VALUES (?, 1, 0, 'J', 'Q')
+        """, (name,))
+
+        conn.commit()
+        return stats
+
+def register_or_join_player(user_id, username, display_name):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO players (id, username, display_name, is_playing_this_season, current_season_score)
+            VALUES (?, ?, ?, 1, 0)
+            ON CONFLICT(id) DO UPDATE SET
+                username = excluded.username,
+                display_name = excluded.display_name,
+                is_playing_this_season = 1
+        """, (user_id, username, display_name))
+        conn.commit()
+
+def add_round_scores(updates: dict):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id, number_of_rounds_played FROM seasons WHERE is_active = 1")
+        season_row = cursor.fetchone()
+        if not season_row:
+            return "Aucune saison active."
+
+        season_id, last_round = season_row
+        new_round = last_round + 1
+
+        for username, change in updates.items():
+            clean_name = username.lstrip('@')
+            cursor.execute("SELECT id FROM players WHERE username = ?", (clean_name,))
+            user_row = cursor.fetchone()
+
+            if user_row:
+                uid = user_row[0]
+                cursor.execute("""
+                    INSERT INTO player_scores (user_id, season_id, round, score_change)
+                    VALUES (?, ?, ?, ?)
+                """, (uid, season_id, new_round, change))
+
+                cursor.execute("""
+                    UPDATE players SET current_season_score = current_season_score + ?
+                    WHERE id = ?
+                """, (change, uid))
+
+        cursor.execute("UPDATE seasons SET number_of_rounds_played = ? WHERE id = ?", (new_round, season_id))
+        conn.commit()
+        return None
+
+def apply_revolution(card):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT special1 FROM seasons WHERE is_active = 1")
+        row = cursor.fetchone()
+        if not row:
+            return False
+
+        old_s1 = row[0]
+        cursor.execute("""
+            UPDATE seasons SET special1 = ?, special2 = ? WHERE is_active = 1
+        """, (card, old_s1))
+        conn.commit()
+        return True
+
+def get_current_leaderboard():
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, special1, special2 FROM seasons WHERE is_active = 1")
+        season_info = cursor.fetchone()
+
+        if not season_info:
+            return [], "Aucune Saison", ("?", "?")
+
+        cursor.execute("""
+            SELECT display_name, current_season_score FROM players
+            WHERE is_playing_this_season = 1 ORDER BY current_season_score DESC
+        """)
+        return cursor.fetchall(), season_info[0], (season_info[1], season_info[2])
