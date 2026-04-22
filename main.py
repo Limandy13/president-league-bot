@@ -154,18 +154,24 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Joueur introuvable dans la base de données.")
         return
 
-    msg = (
-        f"👤 *PROFIL DE {res['name'].upper()}*\n"
-        f"▬" * 12 + "\n"
-        f"📊 *Activité*\n"
-        f"• Manches jouées : {res['nb_manches']}\n"
-        f"• Score moyen : `{res['avg_score']}`\n\n"
-        f"⚔️ *Relations*\n"
-        f"• Partenaire de jeu : {res['most_played']}\n"
-        f"• Sa victime : {res['victim']}\n"
-        f"• Son bourreau : {res['nemesis']}\n"
-        f"▬" * 12
-    )
+    sep = "▬" * 12
+
+    lines = [
+        f"👤 *PROFIL DE {res['name'].upper()}*",
+        sep,
+        "📊 *Activité*",
+        f"• Manches jouées : {res['nb_manches']}",
+        f"• Score moyen : `{res['avg_score']}`",
+        "",
+        "⚔️ *Relations*",
+        f"• Partenaire de jeu : {res['most_played']}",
+        f"• Sa victime : {res['victim']}",
+        f"• Son bourreau : {res['nemesis']}",
+        sep
+    ]
+
+    msg = "\n".join(lines)
+
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def revolution(update: Update, context: ContextTypes.DEFAULT_TYPE):
