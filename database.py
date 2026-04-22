@@ -69,7 +69,8 @@ def add_round_scores(updates: dict):
         cursor = conn.cursor()
         cursor.execute("SELECT id, number_of_rounds_played FROM seasons WHERE is_active = 1")
         row = cursor.fetchone()
-        if not row: return "Aucune saison active."
+        if not row:
+            return "Aucune saison active."
 
         season_id, last_round = row
         new_round = last_round + 1
@@ -90,7 +91,8 @@ def apply_revolution(card):
         cursor = conn.cursor()
         cursor.execute("SELECT special1 FROM seasons WHERE is_active = 1")
         row = cursor.fetchone()
-        if not row: return False
+        if not row:
+            return False
         cursor.execute("UPDATE seasons SET special1 = ?, special2 = ? WHERE is_active = 1", (card, row[0]))
         conn.commit()
         return True
@@ -100,7 +102,8 @@ def get_current_leaderboard():
         cursor = conn.cursor()
         cursor.execute("SELECT name, special1, special2 FROM seasons WHERE is_active = 1")
         info = cursor.fetchone()
-        if not info: return [], "Inconnue", ("?", "?")
+        if not info:
+            return [], "Inconnue", ("?", "?")
         cursor.execute("SELECT display_name, current_season_score FROM players WHERE is_playing_this_season = 1 ORDER BY current_season_score DESC")
         return cursor.fetchall(), info[0], (info[1], info[2])
 
@@ -120,15 +123,23 @@ def get_player_stats(username):
     username = username.lstrip('@')
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
+
         cursor.execute("SELECT id, display_name FROM players WHERE username = ?", (username,))
         user = cursor.fetchone()
-        if not user: return None
+        if not user:
+            return None
         uid, display_name = user
 
-        cursor.execute("SELECT COUNT(*) FROM player_scores WHERE user_id = ?", (uid,))
+        cursor.execute("SELECT id FROM seasons WHERE is_active = 1")
+        active_season_row = cursor.fetchone()
+        if not active_season_row:
+            return None
+        sid = active_season_row[0]
+
+        cursor.execute("SELECT COUNT(*) FROM player_scores WHERE user_id = ? AND season_id = ?", (uid, sid))
         nb_manches = cursor.fetchone()[0] or 0
 
-        cursor.execute("SELECT AVG(score_change) FROM player_scores WHERE user_id = ?", (uid,))
+        cursor.execute("SELECT AVG(score_change) FROM player_scores WHERE user_id = ? AND season_id = ?", (uid, sid))
         avg_score = cursor.fetchone()[0] or 0.0
 
         cursor.execute("""
@@ -136,9 +147,9 @@ def get_player_stats(username):
             FROM player_scores ps1
             JOIN player_scores ps2 ON ps1.round = ps2.round AND ps1.season_id = ps2.season_id
             JOIN players p2 ON ps2.user_id = p2.id
-            WHERE ps1.user_id = ? AND ps2.user_id != ?
+            WHERE ps1.user_id = ? AND ps2.user_id != ? AND ps1.season_id = ?
             GROUP BY p2.id ORDER BY common_rounds DESC LIMIT 1
-        """, (uid, uid))
+        """, (uid, uid, sid))
         most_played = cursor.fetchone()
 
         cursor.execute("""
@@ -146,9 +157,9 @@ def get_player_stats(username):
             FROM player_scores ps1
             JOIN player_scores ps2 ON ps1.round = ps2.round AND ps1.season_id = ps2.season_id
             JOIN players p2 ON ps2.user_id = p2.id
-            WHERE ps1.user_id = ? AND ps1.score_change > 0 AND ps2.user_id != ?
+            WHERE ps1.user_id = ? AND ps1.score_change > 0 AND ps2.user_id != ? AND ps1.season_id = ?
             GROUP BY p2.id ORDER BY target_loss ASC LIMIT 1
-        """, (uid, uid))
+        """, (uid, uid, sid))
         victim = cursor.fetchone()
 
         cursor.execute("""
@@ -156,9 +167,9 @@ def get_player_stats(username):
             FROM player_scores ps1
             JOIN player_scores ps2 ON ps1.round = ps2.round AND ps1.season_id = ps2.season_id
             JOIN players p2 ON ps2.user_id = p2.id
-            WHERE ps1.user_id = ? AND ps1.score_change < 0 AND ps2.user_id != ?
+            WHERE ps1.user_id = ? AND ps1.score_change < 0 AND ps2.user_id != ? AND ps1.season_id = ?
             GROUP BY p2.id ORDER BY target_gain DESC LIMIT 1
-        """, (uid, uid))
+        """, (uid, uid, sid))
         nemesis = cursor.fetchone()
 
         return {
