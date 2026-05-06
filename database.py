@@ -36,6 +36,19 @@ def init_db():
                 FOREIGN KEY(season_id) REFERENCES seasons(id)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS donations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                donor_id INTEGER,
+                recipient_id INTEGER,
+                season_id INTEGER,
+                points INTEGER,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(donor_id) REFERENCES players(id),
+                FOREIGN KEY(recipient_id) REFERENCES players(id),
+                FOREIGN KEY(season_id) REFERENCES seasons(id)
+            )
+        """)
         conn.commit()
 
 def start_new_season(name):
@@ -64,6 +77,80 @@ def register_or_join_player(user_id, username, display_name):
         """, (user_id, username, display_name))
         conn.commit()
 
+
+def ensure_player_for_season(username, user_id=None, display_name=None):
+    username = username.lstrip('@')
+    display_name = display_name or username
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+
+        if user_id is not None:
+            cursor.execute("SELECT id FROM players WHERE id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET username = ?, display_name = ?, is_playing_this_season = 1
+                    WHERE id = ?
+                    """,
+                    (username, display_name, user_id)
+                )
+                conn.commit()
+                return user_id
+
+            cursor.execute("SELECT id FROM players WHERE username = ?", (username,))
+            row = cursor.fetchone()
+            if row:
+                uid = row[0]
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET id = ?, display_name = ?, is_playing_this_season = 1
+                    WHERE id = ?
+                    """,
+                    (user_id, display_name, uid)
+                )
+                conn.commit()
+                return user_id
+
+            cursor.execute(
+                """
+                INSERT INTO players (id, username, display_name, is_playing_this_season, current_season_score)
+                VALUES (?, ?, ?, 1, 0)
+                """,
+                (user_id, username, display_name)
+            )
+            conn.commit()
+            return user_id
+
+        cursor.execute("SELECT id FROM players WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        if row:
+            uid = row[0]
+            cursor.execute(
+                """
+                UPDATE players
+                SET display_name = ?, is_playing_this_season = 1
+                WHERE id = ?
+                """,
+                (display_name, uid)
+            )
+            conn.commit()
+            return uid
+
+        cursor.execute(
+            """
+            INSERT INTO players (username, display_name, is_playing_this_season, current_season_score)
+            VALUES (?, ?, 1, 0)
+            """,
+            (username, display_name)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
 def add_round_scores(updates: dict):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -74,17 +161,124 @@ def add_round_scores(updates: dict):
 
         season_id, last_round = row
         new_round = last_round + 1
-        for username, change in updates.items():
-            cursor.execute("SELECT id FROM players WHERE username = ?", (username.lstrip('@'),))
+
+        players = {}
+        for username in updates:
+            uname = username.lstrip('@')
+            cursor.execute("SELECT id FROM players WHERE username = ?", (uname,))
             user_row = cursor.fetchone()
-            if user_row:
-                uid = user_row[0]
-                cursor.execute("INSERT INTO player_scores (user_id, season_id, round, score_change) VALUES (?, ?, ?, ?)", (uid, season_id, new_round, change))
-                cursor.execute("UPDATE players SET current_season_score = current_season_score + ? WHERE id = ?", (change, uid))
+            if not user_row:
+                return f"Le joueur @{uname} n'existe pas."
+            players[uname] = user_row[0]
+
+        for username, change in updates.items():
+            uid = players[username.lstrip('@')]
+            cursor.execute("INSERT INTO player_scores (user_id, season_id, round, score_change) VALUES (?, ?, ?, ?)", (uid, season_id, new_round, change))
+            cursor.execute("UPDATE players SET current_season_score = current_season_score + ? WHERE id = ?", (change, uid))
 
         cursor.execute("UPDATE seasons SET number_of_rounds_played = ? WHERE id = ?", (new_round, season_id))
         conn.commit()
         return None
+
+
+def _get_active_season_id(cursor):
+    cursor.execute("SELECT id FROM seasons WHERE is_active = 1")
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def _get_active_player(cursor, username):
+    cursor.execute(
+        "SELECT id, display_name, current_season_score FROM players WHERE username = ? AND is_playing_this_season = 1",
+        (username.lstrip('@'),)
+    )
+    return cursor.fetchone()
+
+
+def donate_to_player(donor_username, recipient_username, amount):
+    if amount <= 0:
+        return "Le montant doit être un entier positif."
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        season_id = _get_active_season_id(cursor)
+        if not season_id:
+            return "Aucune saison active."
+
+        donor_row = _get_active_player(cursor, donor_username)
+        if not donor_row:
+            return f"Le donateur @{donor_username.lstrip('@')} n'est pas inscrit cette saison."
+
+        donor_id, _, donor_score = donor_row
+        if donor_score < amount:
+            return f"Tu n'as que {donor_score} points disponibles."
+
+        recipient_row = _get_active_player(cursor, recipient_username)
+        if not recipient_row:
+            return f"Le joueur @{recipient_username.lstrip('@')} n'existe pas dans cette saison."
+
+        recipient_id = recipient_row[0]
+        if donor_id == recipient_id:
+            return "Tu ne peux pas te donner des points à toi-même."
+
+        cursor.execute("UPDATE players SET current_season_score = current_season_score - ? WHERE id = ?", (amount, donor_id))
+        cursor.execute("UPDATE players SET current_season_score = current_season_score + ? WHERE id = ?", (amount, recipient_id))
+        cursor.execute(
+            "INSERT INTO donations (donor_id, recipient_id, season_id, points) VALUES (?, ?, ?, ?)",
+            (donor_id, recipient_id, season_id, amount)
+        )
+        conn.commit()
+        return None
+
+
+def donate_random(donor_username, count):
+    if count <= 0:
+        return "Le montant doit être un entier positif.", None
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        season_id = _get_active_season_id(cursor)
+        if not season_id:
+            return "Aucune saison active.", None
+
+        donor_row = _get_active_player(cursor, donor_username)
+        if not donor_row:
+            return f"Le donateur @{donor_username.lstrip('@')} n'est pas inscrit cette saison.", None
+
+        donor_id, _, donor_score = donor_row
+        if donor_score < count:
+            return f"Tu n'as que {donor_score} points disponibles.", None
+
+        cursor.execute(
+            "SELECT id, display_name FROM players WHERE is_playing_this_season = 1 AND id != ?",
+            (donor_id,)
+        )
+        recipients = cursor.fetchall()
+        if not recipients:
+            return "Aucun autre joueur actif cette saison.", None
+
+        recipient_ids = [row[0] for row in recipients]
+        from random import choices
+        selected = choices(recipient_ids, k=count)
+        recipient_counts = {}
+        for rid in selected:
+            recipient_counts[rid] = recipient_counts.get(rid, 0) + 1
+            cursor.execute("UPDATE players SET current_season_score = current_season_score + 1 WHERE id = ?", (rid,))
+            cursor.execute(
+                "INSERT INTO donations (donor_id, recipient_id, season_id, points) VALUES (?, ?, ?, 1)",
+                (donor_id, rid, season_id)
+            )
+
+        cursor.execute("UPDATE players SET current_season_score = current_season_score - ? WHERE id = ?", (count, donor_id))
+
+        ids = list(recipient_counts.keys())
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(f"SELECT id, display_name FROM players WHERE id IN ({placeholders})", ids)
+        names = {row[0]: row[1] for row in cursor.fetchall()}
+
+        summary = {names[rid]: recipient_counts[rid] for rid in ids}
+        conn.commit()
+        return None, summary
 
 def apply_revolution(card):
     with sqlite3.connect(DB_FILE) as conn:

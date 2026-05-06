@@ -1,0 +1,3 @@
+sudo systemctl stop president.service
+sudo systemctl start president.service
+sudo journalctl -u president.service -n 20

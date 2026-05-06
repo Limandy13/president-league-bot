@@ -18,9 +18,9 @@ logging.basicConfig(level=logging.INFO)
 async def post_init(application):
     commands = [
         BotCommand("help", "Affiche l'aide et les règles"),
-        BotCommand("join", "Rejoindre la saison actuelle"),
         BotCommand("scores", "Voir le classement"),
         BotCommand("play", "Enregistrer une manche"),
+        BotCommand("donate", "Donation de points à un/des joueur(s)"),
         BotCommand("graph", "Graphique des scores"),
         BotCommand("stats", "Stats d'un joueur"),
         BotCommand("revolution", "Lancer une révolution"),
@@ -34,12 +34,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📖 **Guide d'utilisation du Bot**\n\n"
         "👤 **Joueurs**\n"
-        "/join : Rejoindre la saison actuelle\n"
         "/scores : Classement et cartes spéciales\n"
         "/graph : Voir l'évolution des scores de la saison\n"
         "/stats @joueur : Profil détaillé\n\n"
         "🎮 *Jouer une manche*\n"
         "/play +1 @Joueur2 -1 ... : Le premier score est le TIEN, puis liste les autres joueurs et leurs scores.\n\n"
+        "🎁 *Donner des points*\n"
+        "/donate @Joueur 3 : Donne 3 points à un joueur\n"
+        "/donate 3 : Donne 3 points aléatoirement à 3 joueurs\n\n"
         "🔄 *Révolution*\n"
         "/revolution A : Change les cartes spéciales\n\n"
         "⚙️ *Admin*\n"
@@ -47,11 +49,29 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
-async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    username = user.username if user.username else f"no_uname_{user.id}"
-    database.register_or_join_player(user.id, username, user.first_name)
-    await update.message.reply_text(f"✅ {user.first_name} a rejoint la saison !")
+def collect_tagged_user_info(update: Update):
+    tagged = {}
+    if not update.message or not update.message.entities:
+        return tagged
+
+    text = update.message.text or ""
+    for entity in update.message.entities:
+        if entity.type == "text_mention" and entity.user:
+            username = entity.user.username if entity.user.username else f"no_uname_{entity.user.id}"
+            tagged[username] = {
+                "user_id": entity.user.id,
+                "display_name": entity.user.first_name,
+            }
+        elif entity.type == "mention":
+            mention_text = text[entity.offset:entity.offset + entity.length]
+            username = mention_text.lstrip('@')
+            if username not in tagged:
+                tagged[username] = {
+                    "user_id": None,
+                    "display_name": username,
+                }
+
+    return tagged
 
 async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -64,7 +84,14 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         updates = {}
         author_username = author.username if author.username else f"no_uname_{author.id}"
+        author_display_name = author.first_name
         updates[author_username] = int(args[0])
+
+        tagged_users = collect_tagged_user_info(update)
+        tagged_users[author_username] = {
+            "user_id": author.id,
+            "display_name": author_display_name,
+        }
 
         for i in range(1, len(args), 2):
             username = args[i].replace('@', '')
@@ -75,6 +102,17 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Somme = {sum(updates.values())}. Elle doit être 0 !")
             return
 
+        for username in updates:
+            player_info = tagged_users.get(username)
+            if player_info:
+                database.ensure_player_for_season(
+                    username,
+                    user_id=player_info.get("user_id"),
+                    display_name=player_info.get("display_name"),
+                )
+            else:
+                database.ensure_player_for_season(username, display_name=username)
+
         error = database.add_round_scores(updates)
         if error:
             await update.message.reply_text(f"⚠️ {error}")
@@ -83,6 +121,45 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except ValueError:
         await update.message.reply_text("❌ Les scores doivent être des entiers.")
+
+async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/donate @Joueur <points>` ou `/donate <points>`", parse_mode="Markdown")
+        return
+
+    try:
+        if len(context.args) == 1:
+            recipient = None
+            amount = int(context.args[0])
+        elif len(context.args) == 2 and context.args[0].startswith("@"):
+            recipient = context.args[0].lstrip('@')
+            amount = int(context.args[1])
+        else:
+            await update.message.reply_text("❌ Usage: `/donate @Joueur <points>` ou `/donate <points>`", parse_mode="Markdown")
+            return
+    except ValueError:
+        await update.message.reply_text("❌ Les points doivent être un entier.")
+        return
+
+    author = update.effective_user
+    donor_username = author.username if author.username else f"no_uname_{author.id}"
+
+    if recipient:
+        error = database.donate_to_player(donor_username, recipient, amount)
+        if error:
+            await update.message.reply_text(f"⚠️ {error}")
+        else:
+            await update.message.reply_text(f"🎁 Tu as donné {amount} points à @{recipient} !")
+    else:
+        error, summary = database.donate_random(donor_username, amount)
+        if error:
+            await update.message.reply_text(f"⚠️ {error}")
+            return
+
+        lines = [f"🎲 Don aléatoire : {amount} point(s) distribués"]
+        for name, count in summary.items():
+            lines.append(f"• {name} +{count}")
+        await update.message.reply_text("\n".join(lines))
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows, name, spec = database.get_current_leaderboard()
@@ -145,11 +222,14 @@ async def graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_photo(photo=buf, caption="📈 Évolution des scores")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❓ Usage: `/stats @Joueur`", parse_mode="Markdown")
-        return
+    target = None
+    if context.args:
+        target = context.args[0]
+    else:
+        author = update.effective_user
+        target = author.username if author.username else f"no_uname_{author.id}"
 
-    res = database.get_player_stats(context.args[0])
+    res = database.get_player_stats(target)
     if not res:
         await update.message.reply_text("❌ Joueur introuvable dans la base de données.")
         return
@@ -208,8 +288,8 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("join", join))
     app.add_handler(CommandHandler("play", play))
+    app.add_handler(CommandHandler("donate", donate))
     app.add_handler(CommandHandler("graph", graph))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("scores", leaderboard))
