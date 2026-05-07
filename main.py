@@ -200,18 +200,19 @@ async def graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history[name][round_num] = change
 
     plt.figure(figsize=(10, 6))
-    for name, scores in history.items():
+    colors = plt.cm.tab20(range(len(history)))
+    for (name, scores), color in zip(history.items(), colors):
         cumulative = []
         current = 0
         for s in scores[1:]:
             current += s
             cumulative.append(current)
-        plt.plot(rounds, cumulative, marker='o', label=name)
+        plt.plot(rounds, cumulative, marker='o', label=name, color=color)
 
     plt.title("Évolution de la Saison")
     plt.xlabel("Manches")
     plt.ylabel("Points")
-    plt.legend()
+    plt.legend(loc='upper left')
     plt.grid(True, linestyle='--')
 
     buf = io.BytesIO()
