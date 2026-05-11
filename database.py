@@ -1,4 +1,5 @@
 import sqlite3
+import datetime
 
 DB_FILE = "president.db"
 
@@ -78,77 +79,12 @@ def register_or_join_player(user_id, username, display_name):
         conn.commit()
 
 
-def ensure_player_for_season(username, user_id=None, display_name=None):
-    username = username.lstrip('@')
-    display_name = display_name or username
-
+def get_all_player_usernames():
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-
-        if user_id is not None:
-            cursor.execute("SELECT id FROM players WHERE id = ?", (user_id,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET username = ?, display_name = ?, is_playing_this_season = 1
-                    WHERE id = ?
-                    """,
-                    (username, display_name, user_id)
-                )
-                conn.commit()
-                return user_id
-
-            cursor.execute("SELECT id FROM players WHERE username = ?", (username,))
-            row = cursor.fetchone()
-            if row:
-                uid = row[0]
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET id = ?, display_name = ?, is_playing_this_season = 1
-                    WHERE id = ?
-                    """,
-                    (user_id, display_name, uid)
-                )
-                conn.commit()
-                return user_id
-
-            cursor.execute(
-                """
-                INSERT INTO players (id, username, display_name, is_playing_this_season, current_season_score)
-                VALUES (?, ?, ?, 1, 0)
-                """,
-                (user_id, username, display_name)
-            )
-            conn.commit()
-            return user_id
-
-        cursor.execute("SELECT id FROM players WHERE username = ?", (username,))
-        row = cursor.fetchone()
-        if row:
-            uid = row[0]
-            cursor.execute(
-                """
-                UPDATE players
-                SET display_name = ?, is_playing_this_season = 1
-                WHERE id = ?
-                """,
-                (display_name, uid)
-            )
-            conn.commit()
-            return uid
-
-        cursor.execute(
-            """
-            INSERT INTO players (username, display_name, is_playing_this_season, current_season_score)
-            VALUES (?, ?, 1, 0)
-            """,
-            (username, display_name)
-        )
-        conn.commit()
-        return cursor.lastrowid
+        cursor.execute("SELECT username FROM players")
+        usernames = cursor.fetchall()
+        return [uname[0] for uname in usernames]
 
 
 def add_round_scores(updates: dict):
@@ -164,15 +100,14 @@ def add_round_scores(updates: dict):
 
         players = {}
         for username in updates:
-            uname = username.lstrip('@')
-            cursor.execute("SELECT id FROM players WHERE username = ?", (uname,))
+            cursor.execute("SELECT id FROM players WHERE username = ?", (username,))
             user_row = cursor.fetchone()
             if not user_row:
-                return f"Le joueur @{uname} n'existe pas."
-            players[uname] = user_row[0]
+                return f"Le joueur @{username} n'existe pas."
+            players[username] = user_row[0]
 
         for username, change in updates.items():
-            uid = players[username.lstrip('@')]
+            uid = players[username]
             cursor.execute("INSERT INTO player_scores (user_id, season_id, round, score_change) VALUES (?, ?, ?, ?)", (uid, season_id, new_round, change))
             cursor.execute("UPDATE players SET current_season_score = current_season_score + ? WHERE id = ?", (change, uid))
 
@@ -193,6 +128,34 @@ def _get_active_player(cursor, username):
         (username.lstrip('@'),)
     )
     return cursor.fetchone()
+
+
+def _parse_sql_timestamp(timestamp):
+    if not timestamp:
+        return None
+    return datetime.datetime.fromisoformat(timestamp)
+
+
+def _compute_event_x(timestamp, round_boundaries):
+    event_time = _parse_sql_timestamp(timestamp)
+    if not event_time or not round_boundaries:
+        return 0.0
+
+    previous_round = 0
+    previous_time = None
+    for round_num, round_time in round_boundaries:
+        if event_time < round_time:
+            if previous_time is None:
+                return round_num - 0.5
+            total = (round_time - previous_time).total_seconds()
+            if total <= 0:
+                return float(previous_round) + 0.5
+            position = (event_time - previous_time).total_seconds() / total
+            return previous_round + position
+        previous_round = round_num
+        previous_time = round_time
+
+    return float(previous_round) + 0.5
 
 
 def donate_to_player(donor_username, recipient_username, amount):
@@ -304,14 +267,82 @@ def get_current_leaderboard():
 def get_score_history():
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
+        season_id = _get_active_season_id(cursor)
+        if not season_id:
+            return []
+
         cursor.execute("""
-            SELECT p.display_name, ps.round, ps.score_change
+            SELECT round, MIN(timestamp) FROM player_scores
+            WHERE season_id = ?
+            GROUP BY round
+            ORDER BY round ASC
+        """, (season_id,))
+        round_boundaries = [(row[0], _parse_sql_timestamp(row[1])) for row in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT p.display_name, ps.round, ps.score_change, ps.timestamp
             FROM player_scores ps
             JOIN players p ON ps.user_id = p.id
-            WHERE ps.season_id = (SELECT id FROM seasons WHERE is_active = 1)
-            ORDER BY ps.round ASC
-        """)
-        return cursor.fetchall()
+            WHERE ps.season_id = ?
+            ORDER BY ps.round ASC, ps.timestamp ASC
+        """, (season_id,))
+        events = []
+        for display_name, round_num, score_change, timestamp in cursor.fetchall():
+            events.append((display_name, float(round_num), score_change, "round"))
+
+        cursor.execute("""
+            SELECT d.timestamp, donor.display_name, recipient.display_name, d.points
+            FROM donations d
+            JOIN players donor ON d.donor_id = donor.id
+            JOIN players recipient ON d.recipient_id = recipient.id
+            WHERE d.season_id = ?
+            ORDER BY d.timestamp ASC
+        """, (season_id,))
+
+        donations = cursor.fetchall()
+        for timestamp, donor_name, recipient_name, points in donations:
+            x = _compute_event_x(timestamp, round_boundaries)
+            events.append((recipient_name, x, points, "donation"))
+            events.append((donor_name, x, -points, "donation"))
+
+        events.sort(key=lambda item: (item[1], 0 if item[3] == "round" else 1))
+        return events
+
+def get_score_history_timed():
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        season_id = _get_active_season_id(cursor)
+        if not season_id:
+            return []
+
+        cursor.execute("""
+            SELECT p.display_name, ps.timestamp, ps.score_change, 'round'
+            FROM player_scores ps
+            JOIN players p ON ps.user_id = p.id
+            WHERE ps.season_id = ?
+            ORDER BY ps.timestamp ASC, ps.round ASC
+        """, (season_id,))
+        events = []
+        for display_name, timestamp, score_change, event_type in cursor.fetchall():
+            events.append((display_name, _parse_sql_timestamp(timestamp), score_change, event_type))
+
+        cursor.execute("""
+            SELECT d.timestamp, donor.display_name, -d.points, 'donation'
+            FROM donations d
+            JOIN players donor ON d.donor_id = donor.id
+            WHERE d.season_id = ?
+            UNION ALL
+            SELECT d.timestamp, recipient.display_name, d.points, 'donation'
+            FROM donations d
+            JOIN players recipient ON d.recipient_id = recipient.id
+            WHERE d.season_id = ?
+            ORDER BY timestamp ASC
+        """, (season_id, season_id))
+        for timestamp, player_name, points, event_type in cursor.fetchall():
+            events.append((player_name, _parse_sql_timestamp(timestamp), points, event_type))
+
+        events.sort(key=lambda item: (item[1], 0 if item[3] == 'round' else 1))
+        return events
 
 def get_player_stats(username):
     username = username.lstrip('@')

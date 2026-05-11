@@ -1,3 +1,6 @@
+# Commands to run on the Google Cloud VM instance.
+# I created a president.service file so that on crash the bot always restarts
+
 sudo systemctl stop president.service
 sudo systemctl start president.service
 sudo journalctl -u president.service -n 20
